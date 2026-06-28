@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ingénierie Structure AI – Évolutive</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f2f5; height: 100vh; display: flex; flex-direction: column; align-items: center; }
+  .app { width: 100%; max-width: 700px; height: 100vh; display: flex; flex-direction: column; background: #fff; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+  header { background: #2c3e50; color: white; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+  header h1 { font-size: 1.2rem; }
+  .header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .header-actions button { background: #e74c3c; color: white; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+  .header-actions button.secondary { background: #3498db; }
+  .config { padding: 6px 16px; background: #ecf0f1; border-bottom: 1px solid #ddd; font-size: 12px; color: #7f8c8d; display: flex; justify-content: space-between; }
+  #messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .message { max-width: 80%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; position: relative; }
+  .message.user { align-self: flex-end; background: #2980b9; color: white; }
+  .message.assistant { align-self: flex-start; background: #e8eaed; color: #222; }
+  .message.system-note { align-self: center; color: #999; font-size: 11px; font-style: italic; }
+  .feedback { display: flex; gap: 8px; margin-top: 6px; justify-content: flex-end; }
+  .feedback button { background: transparent; border: none; cursor: pointer; font-size: 1.1rem; padding: 0 4px; }
+  .feedback button:hover { transform: scale(1.2); }
+  #chat-form { display: flex; padding: 12px; border-top: 1px solid #ddd; gap: 8px; }
+  #user-input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 6px; resize: none; font-family: inherit; }
+  #send-btn { padding: 10px 20px; background: #27ae60; color: white; border: none; border-radius: 6px; cursor: pointer; }
+  .knowledge-panel { padding: 8px 16px; background: #fef9e7; border-top: 1px solid #f1c40f; font-size: 13px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .knowledge-panel input { flex: 1; min-width: 150px; padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; }
+  .knowledge-panel button { background: #f1c40f; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <header>
+    <h1>🏗 Ingénierie Structure AI</h1>
+    <div class="header-actions">
+      <button class="secondary" id="suggest-btn">💡 Suggérer</button>
+      <button id="reset-btn">🔄 Reset</button>
+    </div>
+  </header>
+  <div class="config">
+    <span>Statut : 🔄 Apprentissage actif</span>
+    <span id="memory-indicator">🧠 0 échanges mémorisés</span>
+  </div>
+  <div id="messages"></div>
+
+  <!-- Panneau de connaissances dynamique -->
+  <div class="knowledge-panel">
+    <span>📚 Savoir‑faire :</span>
+    <input type="text" id="knowledge-input" placeholder="Ajouter une connaissance (ex: Eurocode 2)" />
+    <button id="add-knowledge">Ajouter</button>
+    <span id="knowledge-count">0</span>
+  </div>
+
+  <form id="chat-form">
+    <textarea id="user-input" rows="1" placeholder="Votre question technique..." required></textarea>
+    <button id="send-btn" type="submit">Envoyer</button>
+  </form>
+</div>
+
+<script>
+  const GROQ_API_KEY = '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';
+
+  // ---------- Mémoire persistante ----------
+  const STORAGE_KEY = 'ingenierie_memory';
+  let memory = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {
+    conversations: [],          // [{role, content, feedback?}]
+    knowledge: [],             // chaînes ajoutées par l'utilisateur
+    userPreferences: {}        // ex: { style: 'détaillé' }
+  };
+
+  function saveMemory() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(memory));
+    document.getElementById('memory-indicator').textContent = `🧠 ${memory.conversations.length} échanges mémorisés`;
+    document.getElementById('knowledge-count').textContent = memory.knowledge.length;
+  }
+
+  // ---------- Construction du contexte pour l'API ----------
+  function buildContext(userQuestion) {
+    // On garde les 10 derniers échanges pour le contexte
+    const recent = memory.conversations.slice(-10);
+    // On ajoute les connaissances stockées
+    const knowledgeContext = memory.knowledge.length > 0 
+      ? `Connaissances spécifiques fournies par l'utilisateur : ${memory.knowledge.join('; ')}.` 
+      : '';
+
+    // Prompt système enrichi avec rétroaction
+    let systemPrompt = `Tu es l'agent officiel d'Ingénierie Travaux (ingenierie-travaux.vercel.app). 
+Ton employeur est Aymane Abidine (Ingénieur Génie Civil).
+Tes missions :
+1. Assister Aymane Abidine dans ses études (Eurocodes, EXE, suivi de chantier).
+2. Accueillir les clients avec professionnalisme, clarté et pédagogie.
+3. PROTOCOLE D'URGENCE : Si une situation critique est signalée, tu dois confirmer que tu transmets une alerte prioritaire à Aymane Abidine (06 67 56 63 01 / aymaneabidine@gmail.com) et donner les consignes de sécurité immédiates.
+4. Tu as accès aux données d'Aymane (Lyon/Villeurbanne, expertise béton, Robot Structural Analysis, AutoCAD).
+5. Tu es en apprentissage continu. Prends des initiatives : propose des compléments d'information, demande des précisions si nécessaire, suggère des rendez-vous ou des documents.`;
+
+    // Ajout des préférences utilisateur (si feedback négatif sur un style, on adapte)
+    if (memory.userPreferences.style === 'concis') {
+      systemPrompt += ' L’utilisateur préfère des réponses concises. Va à l’essentiel.';
+    } else if (memory.userPreferences.style === 'détaillé') {
+      systemPrompt += ' L’utilisateur apprécie des réponses détaillées avec des justifications techniques.';
+    }
+
+    // Ajout des connaissances
+    if (knowledgeContext) {
+      systemPrompt += ' ' + knowledgeContext;
+    }
+
+    // On construit le tableau de messages
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...recent,
+      { role: 'user', content: userQuestion }
+    ];
+    return messages;
+  }
+
+  // ---------- Envoi à Groq ----------
+  async function askGroq(userQuestion) {
+    const messages = buildContext(userQuestion);
+    try {
+      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + GROQ_API_KEY },
+        body: JSON.stringify({ 
+          model: 'llama-3.3-70b-versatile', 
+          messages: messages,
+          temperature: 0.7
+        })
+      });
+      const data = await response.json();
+      return data.choices[0].message.content;
+    } catch (err) {
+      console.error(err);
+      return "❌ Erreur de connexion. Veuillez réessayer.";
+    }
+  }
+
+  // ---------- Affichage ----------
+  const messagesEl = document.getElementById('messages');
+
+  function renderMessage(role, content, messageId = null) {
+    const div = document.createElement('div');
+    div.className = 'message ' + role;
+    div.textContent = content;
+    
+    if (role === 'assistant' && messageId) {
+      // Boutons de feedback
+      const feedbackDiv = document.createElement('div');
+      feedbackDiv.className = 'feedback';
+      const upBtn = document.createElement('button');
+      upBtn.textContent = '👍';
+      upBtn.title = 'Réponse utile';
+      upBtn.onclick = () => handleFeedback(messageId, true);
+      const downBtn = document.createElement('button');
+      downBtn.textContent = '👎';
+      downBtn.title = 'Réponse inutile';
+      downBtn.onclick = () => handleFeedback(messageId, false);
+      feedbackDiv.appendChild(upBtn);
+      feedbackDiv.appendChild(downBtn);
+      div.appendChild(feedbackDiv);
+    }
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  // ---------- Gestion du feedback ----------
+  function handleFeedback(messageId, isPositive) {
+    const conv = memory.conversations.find(c => c.id === messageId);
+    if (conv) {
+      conv.feedback = isPositive ? 'positive' : 'negative';
+      // On ajuste les préférences utilisateur en fonction des retours
+      if (!isPositive) {
+        // Si l'utilisateur n'aime pas, on propose plus de concision ou de détails selon le contexte
+        const lastUserMsg = memory.conversations.filter(c => c.role === 'user').pop();
+        if (lastUserMsg && lastUserMsg.content.length > 50) {
+          memory.userPreferences.style = 'concis';
+        } else {
+          memory.userPreferences.style = 'détaillé';
+        }
+      } else {
+        // On renforce le style actuel
+        memory.userPreferences.style = memory.userPreferences.style || 'détaillé';
+      }
+      saveMemory();
+      alert('Merci pour votre retour ! L’agent ajustera ses futures réponses.');
+    }
+  }
+
+  // ---------- Gestion des messages ----------
+  let messageCounter = 0;
+
+  async function sendMessage(text) {
+    if (!text.trim()) return;
+
+    // Ajouter le message utilisateur à la mémoire
+    const userMsg = { id: `u${messageCounter++}`, role: 'user', content: text };
+    memory.conversations.push(userMsg);
+    saveMemory();
+    renderMessage('user', text);
+
+    // Appel API
+    const assistantReply = await askGroq(text);
+    const assistantMsg = { id: `a${messageCounter++}`, role: 'assistant', content: assistantReply };
+    memory.conversations.push(assistantMsg);
+    saveMemory();
+    renderMessage('assistant', assistantReply, assistantMsg.id);
+
+    // Initiative : l'agent peut poser une question complémentaire après 3 échanges
+    const userCount = memory.conversations.filter(c => c.role === 'user').length;
+    if (userCount % 3 === 0 && userCount > 0) {
+      setTimeout(() => {
+        const initiativeMsg = "💡 Puis‑je vous proposer un complément d'information sur les normes Eurocodes ou vous suggérer un rendez‑vous avec Aymane ?";
+        const initAssistant = { id: `a${messageCounter++}`, role: 'assistant', content: initiativeMsg };
+        memory.conversations.push(initAssistant);
+        saveMemory();
+        renderMessage('assistant', initiativeMsg, initAssistant.id);
+      }, 1000);
+    }
+  }
+
+  // ---------- Événements UI ----------
+  document.getElementById('chat-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const input = document.getElementById('user-input');
+    const text = input.value.trim();
+    input.value = '';
+    await sendMessage(text);
+  });
+
+  // Bouton "Suggérer" : l'agent propose une initiative
+  document.getElementById('suggest-btn').addEventListener('click', async () => {
+    const suggestion = "🔍 Je peux vous aider à dimensionner une poutre en béton armé selon l'Eurocode 2. Souhaitez‑vous que je vous guide ?";
+    const assistantMsg = { id: `a${messageCounter++}`, role: 'assistant', content: suggestion };
+    memory.conversations.push(assistantMsg);
+    saveMemory();
+    renderMessage('assistant', suggestion, assistantMsg.id);
+  });
+
+  // Reset
+  document.getElementById('reset-btn').onclick = () => {
+    if (confirm('Effacer toute la mémoire et recommencer ?')) {
+      localStorage.removeItem(STORAGE_KEY);
+      location.reload();
+    }
+  };
+
+  // Ajout de connaissance
+  document.getElementById('add-knowledge').addEventListener('click', () => {
+    const input = document.getElementById('knowledge-input');
+    const val = input.value.trim();
+    if (val) {
+      memory.knowledge.push(val);
+      saveMemory();
+      input.value = '';
+      // On prévient l'utilisateur
+      const note = `📘 Connaissance ajoutée : "${val}". L'agent en tiendra compte.`;
+      const noteMsg = { id: `n${messageCounter++}`, role: 'system-note', content: note };
+      memory.conversations.push(noteMsg);
+      saveMemory();
+      renderMessage('system-note', note);
+    }
+  });
+
+  // ---------- Chargement initial ----------
+  window.onload = () => {
+    // Restaurer l'historique affiché
+    memory.conversations.forEach(msg => {
+      if (msg.role !== 'system-note') {
+        renderMessage(msg.role, msg.content, msg.id);
+      } else {
+        renderMessage('system-note', msg.content);
+      }
+    });
+    saveMemory();
+
+    // Si aucune conversation, message d'accueil
+    if (memory.conversations.length === 0) {
+      const welcome = "Bonjour, je suis l'agent virtuel d'Ingénierie Travaux. Je m'améliore en continu grâce à vos retours. Comment puis‑je vous aider aujourd'hui ?";
+      const welcomeMsg = { id: `a${messageCounter++}`, role: 'assistant', content: welcome };
+      memory.conversations.push(welcomeMsg);
+      saveMemory();
+      renderMessage('assistant', welcome, welcomeMsg.id);
+    }
+  };
+</script>
+
+</body>
+</html>
