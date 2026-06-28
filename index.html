@@ -3,8 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Struct - PDF & Mémoire Évolutive</title>
+    <title>AI Struct - Formules & PDF</title>
+    
+    <!-- KaTeX pour les formules scientifiques -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    
+    <!-- pdf.js pour extraire le texte des PDF -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
         body { font-family:'Segoe UI',sans-serif; background:#f0f2f5; height:100vh; display:flex; flex-direction:column; align-items:center; }
@@ -16,22 +23,25 @@
         .upload-bar input[type="file"] { font-size:0.8rem; flex:1; }
         .upload-bar span { font-size:0.8rem; color:#27ae60; }
         #messages { flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px; }
-        .message { max-width:80%; padding:10px 14px; border-radius:12px; font-size:14px; line-height:1.5; }
+        .message { max-width:85%; padding:10px 14px; border-radius:12px; font-size:14px; line-height:1.6; word-wrap:break-word; }
         .message.user { align-self:flex-end; background:#2980b9; color:#fff; }
         .message.assistant { align-self:flex-start; background:#e8eaed; color:#222; }
         .message.system-note { align-self:center; color:#999; font-size:11px; font-style:italic; }
+        .message.assistant .katex { font-size:1.1em; } /* un peu plus grand pour les maths */
         .feedback { display:flex; gap:8px; margin-top:6px; justify-content:flex-end; }
         .feedback button { background:transparent; border:none; cursor:pointer; font-size:1.1rem; }
         #chat-form { display:flex; padding:10px; border-top:1px solid #ddd; gap:8px; }
         #user-input { flex:1; padding:10px; border:1px solid #ccc; border-radius:6px; resize:none; font-family:inherit; }
         #send-btn { padding:10px 18px; background:#27ae60; color:#fff; border:none; border-radius:6px; cursor:pointer; }
         .info { font-size:11px; color:#7f8c8d; padding:4px 16px; background:#fef9e7; border-top:1px solid #f1c40f; display:flex; justify-content:space-between; }
+        /* Style pour les blocs d'équation (display math) */
+        .message .math-block { text-align:center; margin:8px 0; }
     </style>
 </head>
 <body>
 <div class="app">
     <header>
-        <h1>🏗 AI Struct - PDF</h1>
+        <h1>📐 AI Struct - Formules</h1>
         <div class="header-actions">
             <button id="suggest-btn" style="background:#3498db;">💡 Suggérer</button>
             <button id="reset-btn">🔄 Reset</button>
@@ -47,7 +57,7 @@
         <span>📄 Chunks: <span id="chunk-count">0</span></span>
     </div>
     <form id="chat-form">
-        <textarea id="user-input" rows="1" placeholder="Question technique sur vos PDF..." required></textarea>
+        <textarea id="user-input" rows="1" placeholder="Question technique (ex: calcul de flèche, formule de béton...)"></textarea>
         <button id="send-btn" type="submit">Envoyer</button>
     </form>
 </div>
@@ -55,15 +65,13 @@
 <script>
     // ========== CONFIG ==========
     const GROQ_API_KEY = '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';
-    const HF_EMBEDDING_API = 'https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2';
-    // Pour Hugging Face, pas besoin de clé pour ce modèle (rate limitée, mais gratuite)
-    
+    const STORAGE_KEY = 'ai_struct_math_memory';
+
     // ========== STORAGE ==========
-    const STORAGE_KEY = 'ai_struct_memory';
     let data = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {
         conversations: [],   // [{role, content, feedback?}]
         chunks: [],         // [{id, text, vector}]
-        preferences: {}     // { style: 'concis' ou 'détaillé' }
+        preferences: { style: 'détaillé' }
     };
 
     function saveData() {
@@ -72,49 +80,42 @@
         document.getElementById('chunk-count').textContent = data.chunks.length;
     }
 
-    // ========== EMBEDDING (via Hugging Face) ==========
-    async function getEmbedding(text) {
-        try {
-            const response = await fetch(HF_EMBEDDING_API, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ inputs: text })
-            });
-            if (!response.ok) throw new Error('HF API error');
-            const vector = await response.json();
-            return vector;
-        } catch (e) {
-            console.warn('Embedding fallback: utilisation de mots-clés', e);
-            return null; // fallback sur recherche par mots-clés
-        }
+    // ========== RENDU MATHÉMATIQUE (KaTeX) ==========
+    function renderMathToHTML(text) {
+        if (!text) return '';
+
+        // 1. Remplacer les blocs $$ ... $$ (équations centrées)
+        text = text.replace(/\$\$(.*?)\$\$/gs, (match, math) => {
+            try {
+                return `<div class="math-block">${katex.renderToString(math, { displayMode: true, throwOnError: false })}</div>`;
+            } catch(e) {
+                return match; // en cas d'erreur, on laisse le texte brut
+            }
+        });
+
+        // 2. Remplacer les inline \( ... \) (formules dans la phrase)
+        text = text.replace(/\\\((.*?)\\\)/gs, (match, math) => {
+            try {
+                return katex.renderToString(math, { displayMode: false, throwOnError: false });
+            } catch(e) {
+                return match;
+            }
+        });
+
+        // 3. (Optionnel) Gérer les simples $...$ si l'IA les utilise
+        text = text.replace(/\$(.*?)\$/gs, (match, math) => {
+            // On évite de casser les dollars normaux, on ne le fait que si c'est clairement du LaTeX
+            // On laisse en texte brut par sécurité.
+            return match;
+        });
+
+        // Retourner le texte avec les balises HTML
+        return text;
     }
 
-    // ========== RECHERCHE DES CHUNKS PERTINENTS ==========
-    function cosSimilarity(a, b) {
-        if (!a || !b) return 0;
-        let dot=0, normA=0, normB=0;
-        for (let i=0; i<a.length; i++) {
-            dot += a[i]*b[i];
-            normA += a[i]*a[i];
-            normB += b[i]*b[i];
-        }
-        return dot / (Math.sqrt(normA)*Math.sqrt(normB) || 1);
-    }
-
+    // ========== RECHERCHE DANS LES CHUNKS (mots-clés) ==========
     function findRelevantChunks(query, topN=3) {
         if (data.chunks.length === 0) return [];
-        // Recherche par mots-clés si pas de vecteurs
-        if (!data.chunks[0].vector) {
-            const words = query.toLowerCase().split(/\s+/);
-            return data.chunks
-                .map(c => ({ ...c, score: words.filter(w => c.text.toLowerCase().includes(w)).length }))
-                .sort((a,b) => b.score - a.score)
-                .slice(0, topN);
-        }
-        // Sinon on calcule la similarité cosinus
-        // On embedde la question à la volée (ou on attend)
-        // Pour simplifier, on utilise une recherche par mots-clés si l'embedding est trop lent
-        // Ici on garde la version simple pour la démo (mots-clés)
         const words = query.toLowerCase().split(/\s+/);
         return data.chunks
             .map(c => ({ ...c, score: words.filter(w => c.text.toLowerCase().includes(w)).length }))
@@ -122,18 +123,24 @@
             .slice(0, topN);
     }
 
-    // ========== GROQ ==========
+    // ========== APPEL GROQ ==========
     async function askGroq(userQuestion, contextChunks) {
-        const systemPrompt = `Tu es l'agent IA d'Ingénierie Travaux (Aymane Abidine).
-        Tu es un expert en génie civil, Eurocodes, béton armé, Robot Structural Analysis.
+        // Prompt système avec instruction FORTE sur les formules
+        const systemPrompt = `Tu es l'agent IA d'Ingénierie Travaux (Aymane Abidine), expert en génie civil.
         Tu réponds en français, avec clarté et pédagogie.
+        
+        RÈGLE ABSOLUE POUR LES FORMULES :
+        - Pour toute expression mathématique, fraction, équation, utilise IMPÉRATIVEMENT la syntaxe LaTeX.
+        - Pour une formule dans une phrase, utilise les délimiteurs \\( ... \\) (ex: \\( \\frac{1}{2} \\)).
+        - Pour une équation sur une ligne séparée, utilise les délimiteurs $$ ... $$ (ex: $$ \\sigma = \\frac{F}{A} $$).
+        - Pour les racines : \\( \\sqrt{x} \\), les exposants : \\( x^2 \\), les symboles grecs : \\( \\alpha, \\beta, \\sigma \\).
+
         ${data.preferences.style === 'concis' ? 'Sois concis, va à l\'essentiel.' : 'Donne des détails techniques précis.'}
         
-        Contexte extrait des documents de l'utilisateur :
+        Contexte extrait des documents :
         ${contextChunks.map(c => c.text).join('\n---\n')}
         
-        Réponds à la question en t'appuyant sur ce contexte.
-        Si le contexte ne contient pas l'info, dis-le et propose une aide générale.`;
+        Réponds à la question en t'appuyant sur ce contexte. Si le contexte ne contient pas l'info, dis-le et propose une aide générale.`;
 
         const messages = [
             { role: 'system', content: systemPrompt },
@@ -154,18 +161,24 @@
             const json = await response.json();
             return json.choices[0].message.content;
         } catch (err) {
-            return "❌ Erreur de connexion Groq.";
+            return "❌ Erreur de connexion Groq. Vérifiez votre clé API.";
         }
     }
 
     // ========== AFFICHAGE ==========
     const messagesEl = document.getElementById('messages');
-    let msgCounter = 0;
 
     function renderMessage(role, content, withFeedback = false) {
         const div = document.createElement('div');
         div.className = 'message ' + role;
-        div.textContent = content;
+        
+        // On applique le rendu mathématique pour les messages de l'assistant
+        if (role === 'assistant' || role === 'system-note') {
+            div.innerHTML = renderMathToHTML(content);
+        } else {
+            div.textContent = content; // les messages utilisateur restent en texte brut
+        }
+
         if (withFeedback && role === 'assistant') {
             const fb = document.createElement('div');
             fb.className = 'feedback';
@@ -192,32 +205,30 @@
                 data.preferences.style = 'détaillé';
             }
             saveData();
-            alert('Merci ! L\'IA adaptera son style.');
+            alert('Merci ! L\'IA adaptera son style et ses formules.');
         }
     }
 
     // ========== ENVOI MESSAGE ==========
     async function sendMessage(text) {
         if (!text.trim()) return;
-        // Ajout user
         data.conversations.push({ role: 'user', content: text });
         saveData();
         renderMessage('user', text);
 
-        // Recherche des chunks pertinents
         const relevant = findRelevantChunks(text, 3);
         const reply = await askGroq(text, relevant);
 
-        // Ajout assistant
         const msg = { role: 'assistant', content: reply };
         data.conversations.push(msg);
         saveData();
         renderMessage('assistant', reply, true);
 
-        // Initiative après 3 échanges
-        if (data.conversations.filter(c => c.role === 'user').length % 3 === 0) {
+        // Initiative (tous les 3 échanges)
+        const userCount = data.conversations.filter(c => c.role === 'user').length;
+        if (userCount % 3 === 0 && userCount > 0) {
             setTimeout(() => {
-                const init = "💡 Je peux vous proposer une vérification de ferraillage selon l'Eurocode 2. Voulez-vous que je détaille ?";
+                const init = "💡 Puis-je vous proposer le calcul de la section d'acier selon l'Eurocode 2 ? Je peux vous donner la formule : $$ \\frac{N_{Ed}}{f_{yd}} $$.";
                 data.conversations.push({ role: 'assistant', content: init });
                 saveData();
                 renderMessage('assistant', init, true);
@@ -242,18 +253,17 @@
                 const strings = content.items.map(item => item.str);
                 fullText += strings.join(' ') + '\n';
             }
-            // Découpage en chunks (500 mots)
             const words = fullText.split(/\s+/);
             const chunkSize = 500;
             const chunks = [];
             for (let i=0; i<words.length; i+=chunkSize) {
                 const chunk = words.slice(i, i+chunkSize).join(' ');
-                chunks.push({ id: `c${chunks.length}`, text: chunk, vector: null });
+                chunks.push({ id: `c${chunks.length}`, text: chunk });
             }
             data.chunks = chunks;
             saveData();
             document.getElementById('pdf-status').textContent = `✅ ${chunks.length} chunks extraits (${pdf.numPages} pages)`;
-            renderMessage('system-note', `📄 PDF chargé : ${chunks.length} morceaux prêts à être interrogés.`);
+            renderMessage('system-note', `📄 PDF chargé : ${chunks.length} morceaux prêts.`);
         };
         reader.readAsArrayBuffer(file);
     });
@@ -268,7 +278,7 @@
     });
 
     document.getElementById('suggest-btn').onclick = () => {
-        const sugg = "🔍 Je peux vous aider à calculer une section de poutre. Avez-vous des charges à me donner ?";
+        const sugg = "🔍 Je peux vous aider à vérifier la résistance d'une poutre. La contrainte normale est : $$ \\sigma = \\frac{M}{I} \\cdot y $$. Souhaitez-vous un exemple ?";
         data.conversations.push({ role: 'assistant', content: sugg });
         saveData();
         renderMessage('assistant', sugg, true);
@@ -289,7 +299,7 @@
         });
         saveData();
         if (data.conversations.length === 0) {
-            const welcome = "Bonjour ! Je suis votre IA structure. Uploadez vos PDF (normes, études) et posez vos questions techniques. Je m'améliore avec vos retours !";
+            const welcome = "Bonjour ! Je suis votre IA structure. Je maîtrise les formules scientifiques. Essayez : *Donne-moi la formule de la flèche pour une poutre bi-encastrée* ou uploadez un PDF !";
             data.conversations.push({ role: 'assistant', content: welcome });
             saveData();
             renderMessage('assistant', welcome, true);
