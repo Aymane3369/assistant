@@ -3,15 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Struct - Formules & PDF</title>
-    
-    <!-- KaTeX pour les formules scientifiques -->
+    <title>AI Struct - Formules (corrigé)</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
     <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-    
-    <!-- pdf.js pour extraire le texte des PDF -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
-    
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
         body { font-family:'Segoe UI',sans-serif; background:#f0f2f5; height:100vh; display:flex; flex-direction:column; align-items:center; }
@@ -27,21 +22,20 @@
         .message.user { align-self:flex-end; background:#2980b9; color:#fff; }
         .message.assistant { align-self:flex-start; background:#e8eaed; color:#222; }
         .message.system-note { align-self:center; color:#999; font-size:11px; font-style:italic; }
-        .message.assistant .katex { font-size:1.1em; } /* un peu plus grand pour les maths */
+        .message.assistant .katex { font-size:1.1em; }
         .feedback { display:flex; gap:8px; margin-top:6px; justify-content:flex-end; }
         .feedback button { background:transparent; border:none; cursor:pointer; font-size:1.1rem; }
         #chat-form { display:flex; padding:10px; border-top:1px solid #ddd; gap:8px; }
         #user-input { flex:1; padding:10px; border:1px solid #ccc; border-radius:6px; resize:none; font-family:inherit; }
         #send-btn { padding:10px 18px; background:#27ae60; color:#fff; border:none; border-radius:6px; cursor:pointer; }
         .info { font-size:11px; color:#7f8c8d; padding:4px 16px; background:#fef9e7; border-top:1px solid #f1c40f; display:flex; justify-content:space-between; }
-        /* Style pour les blocs d'équation (display math) */
-        .message .math-block { text-align:center; margin:8px 0; }
+        .math-block { text-align:center; margin:8px 0; }
     </style>
 </head>
 <body>
 <div class="app">
     <header>
-        <h1>📐 AI Struct - Formules</h1>
+        <h1>📐 AI Struct - Formules (corrigé)</h1>
         <div class="header-actions">
             <button id="suggest-btn" style="background:#3498db;">💡 Suggérer</button>
             <button id="reset-btn">🔄 Reset</button>
@@ -65,12 +59,12 @@
 <script>
     // ========== CONFIG ==========
     const GROQ_API_KEY = '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';
-    const STORAGE_KEY = 'ai_struct_math_memory';
+    const STORAGE_KEY = 'ai_struct_math_memory_v2';
 
     // ========== STORAGE ==========
     let data = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {
-        conversations: [],   // [{role, content, feedback?}]
-        chunks: [],         // [{id, text, vector}]
+        conversations: [],
+        chunks: [],
         preferences: { style: 'détaillé' }
     };
 
@@ -80,20 +74,96 @@
         document.getElementById('chunk-count').textContent = data.chunks.length;
     }
 
-    // ========== RENDU MATHÉMATIQUE (KaTeX) ==========
-    function renderMathToHTML(text) {
-        if (!text) return '';
+    // ========== FONCTION DE PRÉ‑TRAITEMENT POUR ENCADRER LE LATEX ==========
+    function autoWrapLatex(text) {
+        // 1. Protéger ce qui est déjà entre \(...\) ou $$...$$ (on les remplace temporairement par des marqueurs)
+        const protected = [];
+        let index = 0;
+        // Remplacer les blocs $$...$$ par des marqueurs
+        text = text.replace(/\$\$(.*?)\$\$/gs, (match, content) => {
+            protected.push({ type: 'display', content: match });
+            return `<<<PROTECTED_${protected.length-1}>>>`;
+        });
+        // Remplacer les \(...\) par des marqueurs
+        text = text.replace(/\\\((.*?)\\\)/gs, (match, content) => {
+            protected.push({ type: 'inline', content: match });
+            return `<<<PROTECTED_${protected.length-1}>>>`;
+        });
 
-        // 1. Remplacer les blocs $$ ... $$ (équations centrées)
+        // 2. Maintenant, chercher les commandes LaTeX non protégées
+        // On va rechercher les motifs courants : \frac, \sqrt, \sum, \int, \alpha, etc.
+        // On utilise une regex pour capturer les commandes avec leurs arguments entre accolades.
+        // Pour simplifier, on va chercher \frac{...}{...} et \sqrt{...} et les remplacer par \(...\)
+        // On peut aussi chercher des commandes simples comme \alpha, \beta, etc. (sans accolades) et les encadrer.
+        // On va procéder par étapes pour les plus courants.
+
+        // 2a. Remplacer \frac{...}{...} par \(\frac{...}{...}\)
+        text = text.replace(/\\frac\{([^}]*)\}\{([^}]*)\}/g, (match, num, den) => {
+            return `\\(\\frac{${num}}{${den}}\\)`;
+        });
+
+        // 2b. Remplacer \sqrt{...} par \(\sqrt{...}\)
+        text = text.replace(/\\sqrt\{([^}]*)\}/g, (match, content) => {
+            return `\\(\\sqrt{${content}}\\)`;
+        });
+
+        // 2c. Remplacer \sum, \int, \prod seuls ou avec limites \sum_{...}^{...}
+        text = text.replace(/\\sum(?:\_\{([^}]*)\})?(?:\^\{([^}]*)\})?/g, (match, sub, sup) => {
+            let s = '\\sum';
+            if (sub) s += `_{${sub}}`;
+            if (sup) s += `^{${sup}}`;
+            return `\\(${s}\\)`;
+        });
+        text = text.replace(/\\int(?:\_\{([^}]*)\})?(?:\^\{([^}]*)\})?/g, (match, sub, sup) => {
+            let s = '\\int';
+            if (sub) s += `_{${sub}}`;
+            if (sup) s += `^{${sup}}`;
+            return `\\(${s}\\)`;
+        });
+
+        // 2d. Remplacer les symboles grecs courants (s'ils ne sont pas déjà dans un bloc)
+        // On les encadre aussi, mais attention à ne pas dupliquer.
+        // On va traiter les cas où ils apparaissent seuls ou avec des indices.
+        text = text.replace(/(\\[a-zA-Z]+)(?:\_\{([^}]*)\})?(?:\^\{([^}]*)\})?/g, (match, cmd, sub, sup) => {
+            // Vérifier si c'est un symbole grec ou une commande connue
+            const greek = ['alpha','beta','gamma','delta','epsilon','zeta','eta','theta','iota','kappa','lambda','mu','nu','xi','omicron','pi','rho','sigma','tau','upsilon','phi','chi','psi','omega'];
+            const cmdName = cmd.slice(1);
+            if (greek.includes(cmdName) || ['sigma','tau','phi','psi','omega','Gamma','Delta','Theta','Lambda','Xi','Pi','Sigma','Phi','Psi','Omega'].includes(cmdName)) {
+                let s = cmd;
+                if (sub) s += `_{${sub}}`;
+                if (sup) s += `^{${sup}}`;
+                // On l'encadre seulement s'il n'est pas déjà dans un délimiteur
+                // Comme on a protégé ceux déjà délimités, on est sûr qu'il est nu
+                return `\\(${s}\\)`;
+            }
+            // Pour les autres, on laisse
+            return match;
+        });
+
+        // 3. Restaurer les blocs protégés
+        text = text.replace(/<<<PROTECTED_(\d+)>>>/g, (match, idx) => {
+            return protected[parseInt(idx)].content;
+        });
+
+        return text;
+    }
+
+    // ========== RENDU FINAL AVEC KATEX ==========
+    function renderMathToHTML(text) {
+        // 1. Prétraiter pour encadrer le LaTeX nu
+        text = autoWrapLatex(text);
+
+        // 2. Maintenant, faire le rendu KaTeX normal
+        // Blocs $$...$$
         text = text.replace(/\$\$(.*?)\$\$/gs, (match, math) => {
             try {
                 return `<div class="math-block">${katex.renderToString(math, { displayMode: true, throwOnError: false })}</div>`;
             } catch(e) {
-                return match; // en cas d'erreur, on laisse le texte brut
+                return match;
             }
         });
 
-        // 2. Remplacer les inline \( ... \) (formules dans la phrase)
+        // Inline \(...\)
         text = text.replace(/\\\((.*?)\\\)/gs, (match, math) => {
             try {
                 return katex.renderToString(math, { displayMode: false, throwOnError: false });
@@ -102,18 +172,10 @@
             }
         });
 
-        // 3. (Optionnel) Gérer les simples $...$ si l'IA les utilise
-        text = text.replace(/\$(.*?)\$/gs, (match, math) => {
-            // On évite de casser les dollars normaux, on ne le fait que si c'est clairement du LaTeX
-            // On laisse en texte brut par sécurité.
-            return match;
-        });
-
-        // Retourner le texte avec les balises HTML
         return text;
     }
 
-    // ========== RECHERCHE DANS LES CHUNKS (mots-clés) ==========
+    // ========== RECHERCHE DANS LES CHUNKS ==========
     function findRelevantChunks(query, topN=3) {
         if (data.chunks.length === 0) return [];
         const words = query.toLowerCase().split(/\s+/);
@@ -125,14 +187,12 @@
 
     // ========== APPEL GROQ ==========
     async function askGroq(userQuestion, contextChunks) {
-        // Prompt système avec instruction FORTE sur les formules
         const systemPrompt = `Tu es l'agent IA d'Ingénierie Travaux (Aymane Abidine), expert en génie civil.
         Tu réponds en français, avec clarté et pédagogie.
-        
         RÈGLE ABSOLUE POUR LES FORMULES :
         - Pour toute expression mathématique, fraction, équation, utilise IMPÉRATIVEMENT la syntaxe LaTeX.
-        - Pour une formule dans une phrase, utilise les délimiteurs \\( ... \\) (ex: \\( \\frac{1}{2} \\)).
-        - Pour une équation sur une ligne séparée, utilise les délimiteurs $$ ... $$ (ex: $$ \\sigma = \\frac{F}{A} $$).
+        - Utilise les délimiteurs \\( ... \\) pour les formules dans le texte, et $$ ... $$ pour les équations sur une ligne séparée.
+        - Exemple : \\( \\frac{1}{2} \\) ou $$ \\sigma = \\frac{F}{A} $$.
         - Pour les racines : \\( \\sqrt{x} \\), les exposants : \\( x^2 \\), les symboles grecs : \\( \\alpha, \\beta, \\sigma \\).
 
         ${data.preferences.style === 'concis' ? 'Sois concis, va à l\'essentiel.' : 'Donne des détails techniques précis.'}
@@ -140,7 +200,7 @@
         Contexte extrait des documents :
         ${contextChunks.map(c => c.text).join('\n---\n')}
         
-        Réponds à la question en t'appuyant sur ce contexte. Si le contexte ne contient pas l'info, dis-le et propose une aide générale.`;
+        Réponds à la question en t'appuyant sur ce contexte.`;
 
         const messages = [
             { role: 'system', content: systemPrompt },
@@ -172,11 +232,10 @@
         const div = document.createElement('div');
         div.className = 'message ' + role;
         
-        // On applique le rendu mathématique pour les messages de l'assistant
         if (role === 'assistant' || role === 'system-note') {
             div.innerHTML = renderMathToHTML(content);
         } else {
-            div.textContent = content; // les messages utilisateur restent en texte brut
+            div.textContent = content;
         }
 
         if (withFeedback && role === 'assistant') {
@@ -205,7 +264,7 @@
                 data.preferences.style = 'détaillé';
             }
             saveData();
-            alert('Merci ! L\'IA adaptera son style et ses formules.');
+            alert('Merci ! L\'IA adaptera son style.');
         }
     }
 
@@ -224,7 +283,7 @@
         saveData();
         renderMessage('assistant', reply, true);
 
-        // Initiative (tous les 3 échanges)
+        // Initiative
         const userCount = data.conversations.filter(c => c.role === 'user').length;
         if (userCount % 3 === 0 && userCount > 0) {
             setTimeout(() => {
